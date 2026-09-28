@@ -1,0 +1,14 @@
+[package]
+name = "espresso"
+version = "0.1.0"
+edition = "2024"
+
+[dependencies]
+windows-sys = { version = "0.61", features = [
+  "Win32_Foundation",
+  "Win32_System_Power",
+  "Win32_System_StationsAndDesktops",
+  "Win32_UI_WindowsAndMessaging",
+  "Win32_System_LibraryLoader",
+] }
+tray-icon = "0.25"
