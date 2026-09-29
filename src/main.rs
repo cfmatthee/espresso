@@ -6,13 +6,18 @@ use windows_sys::Win32::System::LibraryLoader::GetModuleHandleW;
 use windows_sys::Win32::System::Power::{
     ES_CONTINUOUS, ES_DISPLAY_REQUIRED, ES_SYSTEM_REQUIRED, SetThreadExecutionState,
 };
-use windows_sys::Win32::System::StationsAndDesktops::{CloseDesktop, OpenInputDesktop};
+use windows_sys::Win32::System::RemoteDesktop::{
+    NOTIFY_FOR_THIS_SESSION, WTSRegisterSessionNotification, WTSUnRegisterSessionNotification,
+};
 use windows_sys::Win32::UI::WindowsAndMessaging::{
     CreateWindowExW, DefWindowProcW, DestroyWindow, DispatchMessageW, GetMessageW, HWND_MESSAGE,
-    KillTimer, MSG, PBT_APMRESUMEAUTOMATIC, PBT_APMSUSPEND, PostMessageW, PostQuitMessage,
-    RegisterClassExW, SetTimer, TranslateMessage, WM_DESTROY, WM_POWERBROADCAST,
-    WM_QUERYENDSESSION, WM_TIMER, WNDCLASSEXW,
+    MSG, PBT_APMRESUMEAUTOMATIC, PBT_APMSUSPEND, PostMessageW, PostQuitMessage, RegisterClassExW,
+    TranslateMessage, WM_DESTROY, WM_POWERBROADCAST, WM_QUERYENDSESSION, WM_WTSSESSION_CHANGE,
+    WNDCLASSEXW,
 };
+
+const WTS_SESSION_LOCK: u32 = 0x7;
+const WTS_SESSION_UNLOCK: u32 = 0x8;
 
 static IS_ACTIVE: AtomicBool = AtomicBool::new(true);
 static IS_LOCKED: AtomicBool = AtomicBool::new(false);
@@ -28,39 +33,14 @@ unsafe extern "system" fn window_proc(
     lparam: LPARAM,
 ) -> LRESULT {
     match msg {
-        WM_TIMER => {
-            if wparam == 1 {
-                let locked = check_screen_lock();
-                let prev_locked = IS_LOCKED.load(Ordering::SeqCst);
-                if locked != prev_locked {
-                    IS_LOCKED.store(locked, Ordering::SeqCst);
-                    update_execution_state();
-                }
-
-                let menu_channel = MenuEvent::receiver();
-                if let Ok(event) = menu_channel.try_recv() {
-                    unsafe {
-                        if let Some(ref toggle_item) = TOGGLE_ITEM
-                            && event.id == toggle_item.id()
-                        {
-                            let current = IS_ACTIVE.load(Ordering::SeqCst);
-                            let new_state = !current;
-                            IS_ACTIVE.store(new_state, Ordering::SeqCst);
-                            update_execution_state();
-
-                            if new_state {
-                                toggle_item.set_text("Pause Espresso");
-                            } else {
-                                toggle_item.set_text("Resume Espresso");
-                            }
-                        }
-                        if let Some(ref quit_item) = QUIT_ITEM
-                            && event.id == quit_item.id()
-                        {
-                            PostMessageW(hwnd, WM_DESTROY, 0, 0);
-                        }
-                    }
-                }
+        WM_WTSSESSION_CHANGE => {
+            let event = wparam as u32;
+            if event == WTS_SESSION_LOCK {
+                IS_LOCKED.store(true, Ordering::SeqCst);
+                update_execution_state();
+            } else if event == WTS_SESSION_UNLOCK {
+                IS_LOCKED.store(false, Ordering::SeqCst);
+                update_execution_state();
             }
             0
         }
@@ -83,7 +63,7 @@ unsafe extern "system" fn window_proc(
         }
         WM_DESTROY => {
             unsafe {
-                KillTimer(hwnd, 1);
+                WTSUnRegisterSessionNotification(hwnd);
                 PostQuitMessage(0);
             }
             0
@@ -102,18 +82,6 @@ fn update_execution_state() {
             SetThreadExecutionState(ES_CONTINUOUS | ES_SYSTEM_REQUIRED | ES_DISPLAY_REQUIRED);
         } else {
             SetThreadExecutionState(ES_CONTINUOUS);
-        }
-    }
-}
-
-fn check_screen_lock() -> bool {
-    unsafe {
-        let hdesk = OpenInputDesktop(0, 0, 0x0001);
-        if hdesk.is_null() {
-            CloseDesktop(hdesk);
-            false
-        } else {
-            true
         }
     }
 }
@@ -184,6 +152,11 @@ fn main() {
         panic!("Failed to create message window");
     }
 
+    // Register for session notifications (lock/unlock events)
+    unsafe {
+        WTSRegisterSessionNotification(hwnd, NOTIFY_FOR_THIS_SESSION);
+    }
+
     update_execution_state();
 
     let tray_menu = Menu::new();
@@ -193,6 +166,8 @@ fn main() {
     tray_menu.append(&toggle_item).unwrap();
     tray_menu.append(&PredefinedMenuItem::separator()).unwrap();
     tray_menu.append(&quit_item).unwrap();
+
+    let quit_item_id = quit_item.id().clone();
 
     unsafe {
         TOGGLE_ITEM = Some(toggle_item);
@@ -208,9 +183,21 @@ fn main() {
         .build()
         .unwrap();
 
-    unsafe {
-        SetTimer(hwnd, 1, 500, None);
-    }
+    let hwnd_addr = hwnd as usize;
+    std::thread::spawn(move || {
+        let menu_channel = MenuEvent::receiver();
+        let target_hwnd = hwnd_addr as HWND;
+        loop {
+            if let Ok(event) = menu_channel.recv()
+                && event.id == quit_item_id
+            {
+                unsafe {
+                    PostMessageW(target_hwnd, WM_DESTROY, 0, 0);
+                }
+                break;
+            }
+        }
+    });
 
     let mut msg = MSG {
         hwnd: std::ptr::null_mut(),
