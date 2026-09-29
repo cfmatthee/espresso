@@ -23,9 +23,9 @@ static IS_ACTIVE: AtomicBool = AtomicBool::new(true);
 static IS_LOCKED: AtomicBool = AtomicBool::new(false);
 static IS_SUSPENDED: AtomicBool = AtomicBool::new(false);
 
-static mut TOGGLE_ITEM: Option<MenuItem> = None;
-static mut QUIT_ITEM: Option<MenuItem> = None;
-
+// unsafe due to:
+//   FFI Callback: This function is passed to the Windows operating system
+//   Unsafe Operation Inside: This function calls Windows API functions
 unsafe extern "system" fn window_proc(
     hwnd: HWND,
     msg: u32,
@@ -57,18 +57,23 @@ unsafe extern "system" fn window_proc(
         }
         WM_QUERYENDSESSION => {
             unsafe {
+                // unsafe, since this is a call into the Windows API
                 SetThreadExecutionState(ES_CONTINUOUS);
             }
             1
         }
         WM_DESTROY => {
             unsafe {
+                // unsafe, since this is a call into the Windows API
                 WTSUnRegisterSessionNotification(hwnd);
                 PostQuitMessage(0);
             }
             0
         }
-        _ => unsafe { DefWindowProcW(hwnd, msg, wparam, lparam) },
+        _ => unsafe {
+            // unsafe, since this is a call into the Windows API
+            DefWindowProcW(hwnd, msg, wparam, lparam)
+        },
     }
 }
 
@@ -79,8 +84,10 @@ fn update_execution_state() {
 
     unsafe {
         if active && !locked && !suspended {
+            // unsafe, since this is a call into the Windows API
             SetThreadExecutionState(ES_CONTINUOUS | ES_SYSTEM_REQUIRED | ES_DISPLAY_REQUIRED);
         } else {
+            // unsafe, since this is a call into the Windows API
             SetThreadExecutionState(ES_CONTINUOUS);
         }
     }
@@ -110,7 +117,10 @@ fn main() {
     let class_name: Vec<u16> = "EspressoMessageWindowClass\0".encode_utf16().collect();
     let window_name: Vec<u16> = "Espresso Helper\0".encode_utf16().collect();
 
-    let hinstance = unsafe { GetModuleHandleW(std::ptr::null()) };
+    let hinstance = unsafe {
+        // unsafe, since this is a call into the Windows API
+        GetModuleHandleW(std::ptr::null())
+    };
 
     let window_class = WNDCLASSEXW {
         cbSize: std::mem::size_of::<WNDCLASSEXW>() as u32,
@@ -128,10 +138,12 @@ fn main() {
     };
 
     unsafe {
+        // unsafe, since this is a call into the Windows API
         RegisterClassExW(&window_class);
     }
 
     let hwnd = unsafe {
+        // unsafe, since this is a call into the Windows API
         CreateWindowExW(
             0,
             class_name.as_ptr(),
@@ -154,6 +166,7 @@ fn main() {
 
     // Register for session notifications (lock/unlock events)
     unsafe {
+        // unsafe, since this is a call into the Windows API
         WTSRegisterSessionNotification(hwnd, NOTIFY_FOR_THIS_SESSION);
     }
 
@@ -167,15 +180,10 @@ fn main() {
     tray_menu.append(&PredefinedMenuItem::separator()).unwrap();
     tray_menu.append(&quit_item).unwrap();
 
-    let quit_item_id = quit_item.id().clone();
-
-    unsafe {
-        TOGGLE_ITEM = Some(toggle_item);
-        QUIT_ITEM = Some(quit_item);
-    }
+    let toggle_id = toggle_item.id().clone();
+    let quit_id = quit_item.id().clone();
 
     let icon = create_tray_icon_image();
-
     let _tray_icon = TrayIconBuilder::new()
         .with_menu(Box::new(tray_menu))
         .with_tooltip("Espresso - Preventing Sleep")
@@ -188,13 +196,18 @@ fn main() {
         let menu_channel = MenuEvent::receiver();
         let target_hwnd = hwnd_addr as HWND;
         loop {
-            if let Ok(event) = menu_channel.recv()
-                && event.id == quit_item_id
-            {
-                unsafe {
-                    PostMessageW(target_hwnd, WM_DESTROY, 0, 0);
+            if let Ok(event) = menu_channel.recv() {
+                if event.id == quit_id {
+                    unsafe {
+                        // unsafe, since this is a call into the Windows API
+                        PostMessageW(target_hwnd, WM_DESTROY, 0, 0);
+                    }
+                    break;
+                } else if event.id == toggle_id {
+                    let current = IS_ACTIVE.load(Ordering::SeqCst);
+                    IS_ACTIVE.store(!current, Ordering::SeqCst);
+                    update_execution_state();
                 }
-                break;
             }
         }
     });
@@ -209,6 +222,7 @@ fn main() {
     };
 
     unsafe {
+        // unsafe, since this is a call into the Windows API
         while GetMessageW(&mut msg, std::ptr::null_mut(), 0, 0) > 0 {
             TranslateMessage(&msg);
             DispatchMessageW(&msg);
