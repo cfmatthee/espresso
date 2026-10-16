@@ -1,6 +1,7 @@
+use image::ImageReader;
 use std::sync::atomic::{AtomicBool, Ordering};
-use tray_icon::TrayIconBuilder;
 use tray_icon::menu::{Menu, MenuEvent, MenuItem, PredefinedMenuItem};
+use tray_icon::{Icon, TrayIcon, TrayIconBuilder};
 use windows_sys::Win32::Foundation::{HWND, LPARAM, LRESULT, WPARAM};
 use windows_sys::Win32::System::LibraryLoader::GetModuleHandleW;
 use windows_sys::Win32::System::Power::{
@@ -18,6 +19,7 @@ use windows_sys::Win32::UI::WindowsAndMessaging::{
 
 const WTS_SESSION_LOCK: u32 = 0x7;
 const WTS_SESSION_UNLOCK: u32 = 0x8;
+const WM_TRAY_UPDATE: u32 = 0x8001;
 
 static IS_ACTIVE: AtomicBool = AtomicBool::new(true);
 static IS_LOCKED: AtomicBool = AtomicBool::new(false);
@@ -33,6 +35,7 @@ unsafe extern "system" fn window_proc(
     lparam: LPARAM,
 ) -> LRESULT {
     match msg {
+        WM_TRAY_UPDATE => 0,
         WM_WTSSESSION_CHANGE => {
             let event = wparam as u32;
             if event == WTS_SESSION_LOCK {
@@ -78,39 +81,61 @@ unsafe extern "system" fn window_proc(
 }
 
 fn update_execution_state() {
-    let active = IS_ACTIVE.load(Ordering::SeqCst);
-    let locked = IS_LOCKED.load(Ordering::SeqCst);
-    let suspended = IS_SUSPENDED.load(Ordering::SeqCst);
+    let prevent = prevents_sleep();
 
     unsafe {
-        if active && !locked && !suspended {
-            // unsafe, since this is a call into the Windows API
+        // unsafe, since this is a call into the Windows API
+        if prevent {
             SetThreadExecutionState(ES_CONTINUOUS | ES_SYSTEM_REQUIRED | ES_DISPLAY_REQUIRED);
         } else {
-            // unsafe, since this is a call into the Windows API
             SetThreadExecutionState(ES_CONTINUOUS);
         }
     }
 }
 
-fn create_tray_icon_image() -> tray_icon::Icon {
-    let width = 16;
-    let height = 16;
-    let mut rgba = vec![0u8; width * height * 4];
-    for y in 0..height {
-        for x in 0..width {
-            let idx = (y * width + x) * 4;
-            if (2..14).contains(&x) && (2..14).contains(&y) {
-                rgba[idx] = 34;
-                rgba[idx + 1] = 139;
-                rgba[idx + 2] = 34;
-                rgba[idx + 3] = 255;
-            } else {
-                rgba[idx + 3] = 0;
-            }
-        }
+fn prevents_sleep() -> bool {
+    IS_ACTIVE.load(Ordering::SeqCst)
+        && !IS_LOCKED.load(Ordering::SeqCst)
+        && !IS_SUSPENDED.load(Ordering::SeqCst)
+}
+
+fn load_icon(path: &str) -> Icon {
+    let image = ImageReader::open(path)
+        .expect("Failed to open tray icon")
+        .decode()
+        .expect("Failed to decode tray icon")
+        .into_rgba8();
+    let (width, height) = image.dimensions();
+
+    Icon::from_rgba(image.into_raw(), width, height).expect("Invalid tray icon")
+}
+
+fn tray_tooltip(preventing_sleep: bool) -> &'static str {
+    if preventing_sleep {
+        "Espresso - Preventing Sleep"
+    } else {
+        "Espresso - Sleep Prevention Paused"
     }
-    tray_icon::Icon::from_rgba(rgba, width as u32, height as u32).expect("Failed to create icon")
+}
+
+fn update_tray_icon(
+    tray_icon: &TrayIcon,
+    filled_icon: &Icon,
+    empty_icon: &Icon,
+    preventing_sleep: bool,
+) {
+    let icon = if preventing_sleep {
+        filled_icon
+    } else {
+        empty_icon
+    };
+
+    tray_icon
+        .set_icon(Some(icon.clone()))
+        .expect("Failed to update tray icon");
+    tray_icon
+        .set_tooltip(Some(tray_tooltip(preventing_sleep)))
+        .expect("Failed to update tray tooltip");
 }
 
 fn main() {
@@ -183,11 +208,18 @@ fn main() {
     let toggle_id = toggle_item.id().clone();
     let quit_id = quit_item.id().clone();
 
-    let icon = create_tray_icon_image();
-    let _tray_icon = TrayIconBuilder::new()
+    let filled_icon = load_icon("assets/espresso_filled_32.png");
+    let empty_icon = load_icon("assets/espresso_empty_32.png");
+    let mut rendered_preventing_sleep = prevents_sleep();
+    let initial_icon = if rendered_preventing_sleep {
+        filled_icon.clone()
+    } else {
+        empty_icon.clone()
+    };
+    let tray_icon = TrayIconBuilder::new()
         .with_menu(Box::new(tray_menu))
-        .with_tooltip("Espresso - Preventing Sleep")
-        .with_icon(icon)
+        .with_tooltip(tray_tooltip(rendered_preventing_sleep))
+        .with_icon(initial_icon)
         .build()
         .unwrap();
 
@@ -207,6 +239,10 @@ fn main() {
                     let current = IS_ACTIVE.load(Ordering::SeqCst);
                     IS_ACTIVE.store(!current, Ordering::SeqCst);
                     update_execution_state();
+                    unsafe {
+                        // unsafe, since this is a call into the Windows API
+                        PostMessageW(target_hwnd, WM_TRAY_UPDATE, 0, 0);
+                    }
                 }
             }
         }
@@ -226,6 +262,12 @@ fn main() {
         while GetMessageW(&mut msg, std::ptr::null_mut(), 0, 0) > 0 {
             TranslateMessage(&msg);
             DispatchMessageW(&msg);
+
+            let preventing_sleep = prevents_sleep();
+            if preventing_sleep != rendered_preventing_sleep {
+                update_tray_icon(&tray_icon, &filled_icon, &empty_icon, preventing_sleep);
+                rendered_preventing_sleep = preventing_sleep;
+            }
         }
 
         DestroyWindow(hwnd);
