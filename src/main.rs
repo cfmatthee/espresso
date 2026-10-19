@@ -1,4 +1,6 @@
-use image::ImageReader;
+#![windows_subsystem = "windows"]
+
+use image::load_from_memory;
 use std::sync::atomic::{AtomicBool, Ordering};
 use tray_icon::menu::{Menu, MenuEvent, MenuItem, PredefinedMenuItem};
 use tray_icon::{Icon, TrayIcon, TrayIconBuilder};
@@ -102,10 +104,8 @@ fn prevents_sleep() -> bool {
         && !IS_SUSPENDED.load(Ordering::SeqCst)
 }
 
-fn load_icon(path: &str) -> Icon {
-    let image = ImageReader::open(path)
-        .expect("Failed to open tray icon")
-        .decode()
+fn load_icon(bytes: &[u8]) -> Icon {
+    let image = load_from_memory(bytes)
         .expect("Failed to decode tray icon")
         .into_rgba8();
     let (width, height) = image.dimensions();
@@ -253,8 +253,8 @@ fn main() {
     let toggle_id = toggle_item.id().clone();
     let quit_id = quit_item.id().clone();
 
-    let filled_icon = load_icon("assets/espresso_filled_32.png");
-    let empty_icon = load_icon("assets/espresso_empty_32.png");
+    let filled_icon = load_icon(include_bytes!("../assets/espresso_filled_32.png"));
+    let empty_icon = load_icon(include_bytes!("../assets/espresso_empty_32.png"));
     let mut rendered_preventing_sleep = prevents_sleep();
     let initial_icon = if rendered_preventing_sleep {
         filled_icon.clone()
