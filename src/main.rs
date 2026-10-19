@@ -2,7 +2,9 @@ use image::ImageReader;
 use std::sync::atomic::{AtomicBool, Ordering};
 use tray_icon::menu::{Menu, MenuEvent, MenuItem, PredefinedMenuItem};
 use tray_icon::{Icon, TrayIcon, TrayIconBuilder};
-use windows_sys::Win32::Foundation::{HWND, LPARAM, LRESULT, WPARAM};
+use windows_sys::Win32::Foundation::{
+    CloseHandle, ERROR_ALREADY_EXISTS, GetLastError, HANDLE, HWND, LPARAM, LRESULT, WPARAM,
+};
 use windows_sys::Win32::System::LibraryLoader::GetModuleHandleW;
 use windows_sys::Win32::System::Power::{
     ES_CONTINUOUS, ES_DISPLAY_REQUIRED, ES_SYSTEM_REQUIRED, SetThreadExecutionState,
@@ -10,6 +12,7 @@ use windows_sys::Win32::System::Power::{
 use windows_sys::Win32::System::RemoteDesktop::{
     NOTIFY_FOR_THIS_SESSION, WTSRegisterSessionNotification, WTSUnRegisterSessionNotification,
 };
+use windows_sys::Win32::System::Threading::CreateMutexW;
 use windows_sys::Win32::UI::WindowsAndMessaging::{
     CreateWindowExW, DefWindowProcW, DestroyWindow, DispatchMessageW, GetMessageW, HWND_MESSAGE,
     MSG, PBT_APMRESUMEAUTOMATIC, PBT_APMSUSPEND, PostMessageW, PostQuitMessage, RegisterClassExW,
@@ -138,7 +141,40 @@ fn update_tray_icon(
         .expect("Failed to update tray tooltip");
 }
 
+fn acquire_instance_mutex() -> Option<HANDLE> {
+    let name: Vec<u16> = "Local\\Espresso.SingleInstance\0".encode_utf16().collect();
+
+    let mutex = unsafe {
+        // unsafe, since this is a call into the Windows API
+        CreateMutexW(std::ptr::null(), 0, name.as_ptr())
+    };
+
+    if mutex.is_null() {
+        panic!("Failed to create single-instance mutex");
+    }
+
+    let already_exists = unsafe {
+        // unsafe, since this is a call into the Windows API
+        GetLastError() == ERROR_ALREADY_EXISTS
+    };
+
+    if already_exists {
+        unsafe {
+            // unsafe, since this is a call into the Windows API
+            CloseHandle(mutex);
+        }
+        None
+    } else {
+        Some(mutex)
+    }
+}
+
 fn main() {
+    let instance_mutex = match acquire_instance_mutex() {
+        Some(mutex) => mutex,
+        None => return,
+    };
+
     let class_name: Vec<u16> = "EspressoMessageWindowClass\0".encode_utf16().collect();
     let window_name: Vec<u16> = "Espresso Helper\0".encode_utf16().collect();
 
@@ -290,5 +326,7 @@ fn main() {
         }
 
         DestroyWindow(hwnd);
+
+        CloseHandle(instance_mutex);
     }
 }
