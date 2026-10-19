@@ -114,7 +114,7 @@ fn tray_tooltip(preventing_sleep: bool) -> &'static str {
     if preventing_sleep {
         "Espresso - Preventing Sleep"
     } else {
-        "Espresso - Sleep Prevention Paused"
+        "Espresso - Paused"
     }
 }
 
@@ -197,8 +197,17 @@ fn main() {
 
     update_execution_state();
 
+    let mut rendered_active = IS_ACTIVE.load(Ordering::SeqCst);
     let tray_menu = Menu::new();
-    let toggle_item = MenuItem::new("Pause Espresso", true, None);
+    let toggle_item = MenuItem::new(
+        if rendered_active {
+            "Pause Espresso"
+        } else {
+            "Resume Espresso"
+        },
+        true,
+        None,
+    );
     let quit_item = MenuItem::new("Quit", true, None);
 
     tray_menu.append(&toggle_item).unwrap();
@@ -267,6 +276,16 @@ fn main() {
             if preventing_sleep != rendered_preventing_sleep {
                 update_tray_icon(&tray_icon, &filled_icon, &empty_icon, preventing_sleep);
                 rendered_preventing_sleep = preventing_sleep;
+            }
+
+            let active = IS_ACTIVE.load(Ordering::SeqCst);
+            if active != rendered_active {
+                toggle_item.set_text(if active {
+                    "Pause Espresso"
+                } else {
+                    "Resume Espresse"
+                });
+                rendered_active = active;
             }
         }
 
