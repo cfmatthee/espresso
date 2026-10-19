@@ -1,6 +1,10 @@
 [package]
 name = "espresso"
 version = "0.1.0"
+description = "A windows tray application that prevents the computer from sleeping"
+authors = ["CF Matthee"]
+license = "Unlicense"
+repository = "https://github.com/cfmatthee/espresso"
 edition = "2024"
 
 [dependencies]
